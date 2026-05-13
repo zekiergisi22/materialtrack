@@ -1,113 +1,91 @@
 import streamlit as st
 import pandas as pd
 from streamlit_gsheets import GSheetsConnection
+from datetime import date
 
 # --- 1. SAYFA VE GÖRÜNÜM AYARLARI ---
 st.set_page_config(page_title="MOL-OCU Tedarik Yönetimi", page_icon="🏗️", layout="wide")
 
-st.title("📊 MOL-OCU Projesi Malzeme Tedarik Dashboard")
-st.markdown("Veriler doğrudan **OCU Material Track** isimli Google Sheets dosyanızdan canlı olarak çekilmektedir.")
+st.title("🏗️ MOL-OCU Malzeme Tedarik ve Veri Giriş Sistemi")
 
-# --- 2. GOOGLE SHEETS VERİTABANI BAĞLANTISI ---
+# --- 2. GOOGLE SHEETS BAĞLANTISI ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-try:
-    # Veriyi çek (ttl="1m" -> Verileri her 1 dakikada bir günceller)
-    st.info("🔄 Google Sheets üzerinden güncel veriler senkronize ediliyor...")
-    df = conn.read(ttl="1m")
+# Mevcut veriyi çek (ttl=0 yaparak her işlemde taze veri alıyoruz)
+df = conn.read(ttl=0)
+df = df.dropna(how="all")
+df.columns = df.columns.str.strip() # Sütun isimlerini temizle
+
+# --- 3. YAN MENÜ (NAVİGASYON) ---
+menu = st.sidebar.selectbox("İşlem Seçiniz", ["📊 Dashboard", "📝 Yeni Veri Girişi"])
+
+# --- 4. MODÜL: DASHBOARD (İZLEME) ---
+if menu == "📊 Dashboard":
+    # (Önceki yazdığımız Dashboard kodlarını buraya alıyoruz)
+    st.subheader("Anlık Tedarik Durumu")
     
-    # Tüm satır veya sütunları tamamen boş olanları temizle
-    df = df.dropna(how="all")
+    # Hızlı Filtreleme Mantığı
+    pr_bekleyen = df[(df['Quotation_Status'].str.contains('Approved', case=False, na=False)) & (df['PR_No'].fillna('').str.strip() == '')]
+    po_bekleyen = df[(df['PR_No'].fillna('').str.strip() != '') & (df['PO_No'].fillna('').str.strip() == '')]
     
-    # ÇOK ÖNEMLİ: Excel'deki görünmez boşluk hatalarını çözmek için tüm sütun isimlerini temizliyoruz
-    df.columns = df.columns.str.strip()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Toplam Kalem", len(df))
+    c2.metric("PR Bekleyen", len(pr_bekleyen))
+    c3.metric("PO Bekleyen", len(po_bekleyen))
     
-    # Başlıklarınızdaki olası isim farklılıklarını garantiye almak için kontrol:
-    # Eğer "Malzeme _Kalemi" gibi boşluklu yazılmışsa onu düzeltiriz.
-    if 'Malzeme _Kalemi' in df.columns:
-        df.rename(columns={'Malzeme _Kalemi': 'Malzeme_Kalemi'}, inplace=True)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+# --- 5. MODÜL: YENİ VERİ GİRİŞİ ---
+elif menu == "📝 Yeni Veri Girişi":
+    st.subheader("Yeni Malzeme Kaydı Oluştur")
     
-    # --- 3. VERİ TEMİZLEME VE HAZIRLIK ---
-    # Hata almamak için boş (NaN) değerleri string boşluğa ('') çeviriyoruz
-    if 'PR_No' in df.columns:
-        df['PR_No'] = df['PR_No'].fillna('').astype(str)
-    else:
-        st.error("⚠️ 'PR_No' sütunu bulunamadı. Lütfen Excel başlıklarını kontrol edin.")
+    # Mevcut Ana Grupları listeden al (veya yeni yazılmasına izin ver)
+    ana_gruplar = df['Ana_Grup'].dropna().unique().tolist()
+    
+    with st.form("yeni_kayit_formu", clear_on_submit=True):
+        col1, col2 = st.columns(2)
         
-    if 'PO_No' in df.columns:
-        df['PO_No'] = df['PO_No'].fillna('').astype(str)
+        with col1:
+            secilen_grup = st.selectbox("Ana Grubu Seçin", options=["--- Yeni Grup Ekle ---"] + ana_gruplar)
+            if secilen_grup == "--- Yeni Grup Ekle ---":
+                yeni_grup_adi = st.text_input("Yeni Ana Grup Adını Yazın (Örn: 50.OCU-Pipeline)")
+                ana_grup = yeni_grup_adi
+            else:
+                ana_grup = secilen_grup
+            
+            malzeme = st.text_input("Malzeme Kalemi / Cinsi")
+            durum = st.selectbox("Teklif Durumu", ["Quotation Approved", "Quotation Received", "Material List Sent for Quotation", "Under Preperation"])
+            
+        with col2:
+            pr_no = st.text_input("PR Numarası (Varsa)")
+            po_no = st.text_input("PO Numarası (Varsa)")
+            receiving_pct = st.number_input("Saha Kabul Yüzdesi (%)", min_value=0, max_value=100, value=0)
+            
+        notlar = st.text_area("Malzeme Notları / Detaylar")
         
-    if 'Quotation_Status' in df.columns:
-        df['Quotation_Status'] = df['Quotation_Status'].fillna('').astype(str)
-    
-    # Yüzde değerlerini matematiksel işleme sokabilmek için sayıya çeviriyoruz
-    if 'Receiving_Pct' in df.columns:
-        df['Receiving_Pct'] = df['Receiving_Pct'].astype(str).str.replace('%', '').str.strip()
-        df['Receiving_Pct'] = pd.to_numeric(df['Receiving_Pct'], errors='coerce').fillna(0)
-    else:
-        st.error("⚠️ 'Receiving_Pct' sütunu bulunamadı. Lütfen Excel başlıklarını kontrol edin.")
-
-    # --- 4. MANTIKSAL FİLTRELEMELER ---
-    
-    # 1. PR Bekleyen: Teklifi onaylanmış (Approved) ama PR numarası boş olanlar
-    pr_bekleyen = df[(df['Quotation_Status'].str.contains('Approved', case=False, na=False)) & (df['PR_No'].str.strip() == '')]
-    
-    # 2. PO Bekleyen: PR numarası girilmiş ama PO numarası boş olanlar
-    po_bekleyen = df[(df['PR_No'].str.strip() != '') & (df['PO_No'].str.strip() == '')]
-    
-    # 3. Sahaya Ulaşan: Kabul yüzdesi (Receiving_Pct) 100 veya üzeri olanlar
-    # Eğer Receiving_Pct sütunu bulunamazsa kodun çökmemesi için boş bir tablo (DataFrame) oluşturuyoruz
-    if 'Receiving_Pct' in df.columns:
-        sahaya_ulasan = df[df['Receiving_Pct'] >= 100]
-    else:
-        sahaya_ulasan = pd.DataFrame(columns=df.columns)
-
-    # --- 5. ÜST METRİKLER (KPI KARTLARI) ---
-    st.subheader("Anlık Durum Özetleri")
-    col1, col2, col3, col4 = st.columns(4)
-
-    col1.metric("Toplam Takip Edilen Kalem", len(df))
-    col2.metric("PR Açılması Bekleyen", len(pr_bekleyen), delta="Aksiyon Gerekli", delta_color="inverse")
-    col3.metric("PO Siparişi Bekleyen", len(po_bekleyen), delta="Sipariş Bekliyor", delta_color="inverse")
-    col4.metric("Sahaya Ulaşan Malzemeler", len(sahaya_ulasan), delta="Teslim Alındı")
-
-    st.divider()
-
-    # --- 6. SEKMELER (TABS) İLE DETAYLI RAPORLAMA ---
-    st.subheader("📌 Kategori Bazlı İşlem Detayları")
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "📋 PR Bekleyenler", 
-        "⏳ PO Bekleyenler", 
-        "✅ Sahaya Ulaşanlar", 
-        "🔍 Tüm Veritabanı ve Arama"
-    ])
-
-    with tab1:
-        st.error("**Tedarikçisi Onaylanmış ancak Satınalma Talebi (PR) henüz açılmamış malzemeler:**")
-        st.dataframe(pr_bekleyen, use_container_width=True, hide_index=True)
-
-    with tab2:
-        st.warning("**PR Numarası alınmış ancak henüz Sipariş (PO) aşamasına geçilmemiş kalemler:**")
-        st.dataframe(po_bekleyen, use_container_width=True, hide_index=True)
-
-    with tab3:
-        st.success("**Sahaya gelmiş ve %100 teslim alınmış malzemeler:**")
-        st.dataframe(sahaya_ulasan, use_container_width=True, hide_index=True)
-
-    with tab4:
-        st.markdown("**🔍 Veritabanında Detaylı Arama Yapın**")
+        submit_button = st.form_submit_button("Veritabanına Kaydet")
         
-        arama = st.text_input("Aramak İstediğiniz Malzeme, Tedarikçi veya Ana Grubu Yazın (Örn: Flange, Leser, Steel):")
-        
-        if arama:
-            mask = df.apply(lambda row: row.astype(str).str.contains(arama, case=False, na=False).any(), axis=1)
-            filtrelenmis_df = df[mask]
-            st.dataframe(filtrelenmis_df, use_container_width=True, hide_index=True)
-            st.caption(f"Arama sonucunda {len(filtrelenmis_df)} kayıt bulundu.")
-        else:
-            st.dataframe(df, use_container_width=True, hide_index=True)
-
-except Exception as e:
-    st.error("⚠️ Google Sheets'ten veri çekilirken bir hata oluştu.")
-    st.info("Lütfen linkin herkese açık olduğundan ve Secrets ayarlarının doğru yapıldığından emin olun.")
-    st.write("Teknik Hata Detayı:", e)
+        if submit_button:
+            if ana_grup and malzeme:
+                # Yeni veriyi bir sözlük (dictionary) olarak hazırla
+                # Google Sheets'teki sütun başlıklarınızla BİREBİR aynı olmalı
+                yeni_veri = {
+                    "Ana_Grup": ana_grup,
+                    "Malzeme_Kalemi": malzeme,
+                    "Quotation_Status": durum,
+                    "PR_No": pr_no,
+                    "PO_No": po_no,
+                    "Receiving_Pct": receiving_pct,
+                    "Description / Remarks": notlar
+                }
+                
+                # Mevcut DataFrame'e ekle
+                yeni_df = pd.concat([df, pd.DataFrame([yeni_veri])], ignore_index=True)
+                
+                # Google Sheets'i GÜNCELLE
+                conn.update(data=yeni_df)
+                
+                st.success(f"✅ {malzeme} başarıyla Google Sheets'e kaydedildi!")
+                st.balloons()
+            else:
+                st.warning("Lütfen 'Ana Grup' ve 'Malzeme Kalemi' alanlarını doldurun.")
