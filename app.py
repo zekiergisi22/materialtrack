@@ -11,10 +11,10 @@ st.title("🏗️ MOL-OCU Malzeme Tedarik ve Veri Yönetim Sistemi")
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 try:
-    # Mevcut veriyi çek (ttl=0 yaparak her sayfada taze veri alıyoruz)
+    # Mevcut veriyi çek
     df = conn.read(ttl=0)
     df = df.dropna(how="all")
-    df.columns = df.columns.str.strip() # Sütun isimlerini temizle
+    df.columns = df.columns.str.strip()
 
     # Boşluk hatalarını engellemek için veri tiplerini standartlaştıralım
     if 'PR_No' in df.columns:
@@ -29,7 +29,7 @@ try:
 
 except Exception as e:
     st.error("⚠️ Google Sheets bağlantısında hata oluştu. Lütfen Secrets ayarlarını kontrol edin.")
-    st.stop() # Hata varsa aşağıyı çalıştırma
+    st.stop()
 
 # --- 3. YAN MENÜ (NAVİGASYON) ---
 menu = st.sidebar.selectbox(
@@ -38,37 +38,65 @@ menu = st.sidebar.selectbox(
 )
 
 st.sidebar.divider()
-st.sidebar.info("💡 **Bilgi:** Bu sistemdeki tüm veriler 'OCU Material Track' isimli Google Sheets dosyanızla anlık olarak senkronizedir.")
+st.sidebar.info("💡 **Bilgi:** Bu sistemdeki tüm veriler Google Sheets dosyanızla anlık olarak senkronizedir.")
 
 # =======================================================
-# MODÜL 1: DASHBOARD (İZLEME)
+# MODÜL 1: DASHBOARD (İZLEME) - YENİLENMİŞ VERSİYON
 # =======================================================
 if menu == "📊 Dashboard (İzleme)":
-    st.subheader("Anlık Tedarik Durumu")
     
-    # Hızlı Filtreleme Mantığı
-    pr_bekleyen = df[(df['Quotation_Status'].str.contains('Approved', case=False, na=False)) & (df['PR_No'].str.strip() == '')]
-    po_bekleyen = df[(df['PR_No'].str.strip() != '') & (df['PO_No'].str.strip() == '')]
-    sahaya_ulasan = df[df['Receiving_Pct'] >= 100] if 'Receiving_Pct' in df.columns else pd.DataFrame()
+    # --- KATEGORİ (ANA GRUP) SEÇİMİ ---
+    ana_gruplar = ["🌟 Genel Görünüm (Overall)"] # Varsayılan ilk seçenek
+    if 'Ana_Grup' in df.columns:
+        # Veritabanındaki benzersiz grupları alıp listeye ekle
+        ana_gruplar.extend(df['Ana_Grup'].dropna().unique().tolist())
     
-    # Üst Metrikler
+    # Kullanıcı seçimi
+    secilen_grup = st.selectbox("📂 İncelemek İstediğiniz Kategoriyi Seçiniz:", ana_gruplar)
+    
+    # --- VERİYİ SEÇİME GÖRE FİLTRELEME ---
+    if secilen_grup == "🌟 Genel Görünüm (Overall)":
+        gosterilecek_df = df.copy()
+        st.subheader("Tüm Projenin Anlık Durumu")
+    else:
+        gosterilecek_df = df[df['Ana_Grup'] == secilen_grup].copy()
+        st.subheader(f"Durum Özeti: {secilen_grup}")
+
+    # --- DİNAMİK METRİKLER (Sadece filtrelenmiş veriye göre hesaplanır) ---
+    pr_bekleyen = gosterilecek_df[(gosterilecek_df['Quotation_Status'].str.contains('Approved', case=False, na=False)) & (gosterilecek_df['PR_No'].str.strip() == '')]
+    po_bekleyen = gosterilecek_df[(gosterilecek_df['PR_No'].str.strip() != '') & (gosterilecek_df['PO_No'].str.strip() == '')]
+    sahaya_ulasan = gosterilecek_df[gosterilecek_df['Receiving_Pct'] >= 100] if 'Receiving_Pct' in gosterilecek_df.columns else pd.DataFrame()
+    
+    # Üst Metrik Kartları
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Toplam Kalem", len(df))
-    c2.metric("PR Bekleyen", len(pr_bekleyen), delta="Aksiyon Bekliyor", delta_color="inverse")
-    c3.metric("PO Bekleyen", len(po_bekleyen), delta="Siparişe Dönüşmeli", delta_color="inverse")
+    c1.metric("Toplam Kalem", len(gosterilecek_df))
+    
+    # Eğer eksik yoksa yeşil (normal), eksik varsa kırmızı (inverse) yansıtma mantığı
+    pr_renk = "normal" if len(pr_bekleyen) == 0 else "inverse"
+    po_renk = "normal" if len(po_bekleyen) == 0 else "inverse"
+    
+    c2.metric("PR Bekleyen", len(pr_bekleyen), delta="Sorun Yok" if len(pr_bekleyen)==0 else "Aksiyon Bekliyor", delta_color=pr_renk)
+    c3.metric("PO Bekleyen", len(po_bekleyen), delta="Sorun Yok" if len(po_bekleyen)==0 else "Siparişe Dönüşmeli", delta_color=po_renk)
     c4.metric("Sahaya Ulaşan", len(sahaya_ulasan), delta="Teslim Alındı")
     
     st.divider()
     
-    # Detaylı Arama Ekranı
-    st.markdown("**🔍 Veritabanında Arama Yapın**")
-    arama = st.text_input("Malzeme, Tedarikçi veya Ana Grup arayın (Örn: Leser, Flange, PR-1001):")
+    # --- DETAYLI ARAMA VE TABLO GÖSTERİMİ ---
+    if secilen_grup == "🌟 Genel Görünüm (Overall)":
+        st.markdown("**🔍 Tüm Veritabanında Arama Yapın**")
+    else:
+        st.markdown(f"**🔍 '{secilen_grup}' Kategorisinde Arama Yapın**")
+        
+    arama = st.text_input("Malzeme, Tedarikçi veya Sipariş Numarası arayın (Örn: Leser, Flange, PR-1001):")
     
     if arama:
-        mask = df.apply(lambda row: row.astype(str).str.contains(arama, case=False, na=False).any(), axis=1)
-        st.dataframe(df[mask], use_container_width=True, hide_index=True)
+        # Arama kelimesi varsa sadece onları göster
+        mask = gosterilecek_df.apply(lambda row: row.astype(str).str.contains(arama, case=False, na=False).any(), axis=1)
+        st.dataframe(gosterilecek_df[mask], use_container_width=True, hide_index=True)
     else:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        # Arama yoksa filtrelenmiş kategorinin tamamını göster
+        st.dataframe(gosterilecek_df, use_container_width=True, hide_index=True)
+
 
 # =======================================================
 # MODÜL 2: YENİ VERİ GİRİŞİ
@@ -76,7 +104,6 @@ if menu == "📊 Dashboard (İzleme)":
 elif menu == "📝 Yeni Malzeme Ekle":
     st.subheader("Sisteme Yeni Malzeme Kalemi Ekle")
     
-    # Mevcut Ana Grupları listeden al (Hata vermemesi için boş olanları temizle)
     ana_gruplar = []
     if 'Ana_Grup' in df.columns:
         ana_gruplar = df['Ana_Grup'].dropna().unique().tolist()
@@ -113,15 +140,13 @@ elif menu == "📝 Yeni Malzeme Ekle":
                     "PO_No": po_no,
                     "Receiving_Pct": receiving_pct
                 }
-                
-                # Mevcut verinin altına yeni veriyi ekle ve Google Sheets'i güncelle
                 yeni_df = pd.concat([df, pd.DataFrame([yeni_veri])], ignore_index=True)
                 conn.update(data=yeni_df)
-                
                 st.success(f"✅ {malzeme} başarıyla sisteme eklendi!")
                 st.balloons()
             else:
                 st.warning("Lütfen 'Ana Grup' ve 'Malzeme Kalemi' alanlarını eksiksiz doldurun.")
+
 
 # =======================================================
 # MODÜL 3: VERİ DÜZENLEME & SİLME (PORTAL)
@@ -132,12 +157,10 @@ elif menu == "✏️ Verileri Düzenle / Sil":
     st.info("""
     **Nasıl Kullanılır?**
     * ✏️ **Düzenlemek için:** Değiştirmek istediğiniz hücreye çift tıklayın ve yeni değeri yazın.
-    * 🗑️ **Silmek için:** Silmek istediğiniz satırın en solundaki gri kutucuğu seçin klavyenizden 'Delete' tuşuna veya sağ üstte çıkan çöp kutusu ikonuna basın.
-    * ➕ **Hızlı Eklemek için:** Tablonun en altındaki boş satıra tıklayarak hızlıca yeni veri yazabilirsiniz.
+    * 🗑️ **Silmek için:** Silmek istediğiniz satırın en solundaki gri kutucuğu seçip 'Delete' tuşuna veya çöp kutusu ikonuna basın.
     * 💾 İşleminiz bitince alttaki mavi renkli **Kaydet** butonuna basmayı unutmayın!
     """)
     
-    # Etkileşimli Excel / Veri Düzenleyici Arayüzü (num_rows="dynamic" silme ve eklemeye izin verir)
     edited_df = st.data_editor(
         df, 
         use_container_width=True, 
@@ -145,9 +168,7 @@ elif menu == "✏️ Verileri Düzenle / Sil":
         height=600
     )
     
-    # Değişiklikleri Kaydet Butonu
     if st.button("💾 Değişiklikleri Google Sheets'e Kaydet", type="primary", use_container_width=True):
         with st.spinner("Değişiklikler Google Sheets'e aktarılıyor..."):
-            # Temizlenmiş ve düzenlenmiş son veriyi Google Sheets'e yazar
             conn.update(data=edited_df)
             st.success("✅ Tüm değişiklikleriniz başarıyla kaydedildi! Dashboard otomatik olarak güncellendi.")
